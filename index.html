@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Geo Photos</title>
+  <link rel="stylesheet" href="lib/leaflet.css" />
+  <link rel="stylesheet" href="lib/MarkerCluster.css" />
+  <link rel="stylesheet" href="lib/MarkerCluster.Default.css" />
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body class="mode-map">
+  <div id="hud">
+    <button type="button" class="hud-tab" id="hudTab" aria-label="展开菜单" title="展开"></button>
+    <div class="hud-body">
+      <div class="mode-switch" role="tablist" aria-label="展现模式">
+        <button type="button" class="mode-btn active" data-mode="map" role="tab" aria-selected="true">地图</button>
+        <button type="button" class="mode-btn" data-mode="album" role="tab" aria-selected="false">相册</button>
+        <button type="button" class="mode-btn" data-mode="slideshow" role="tab" aria-selected="false">幻灯片</button>
+      </div>
+      <div class="hud-row">
+        <div class="meta" id="statsText">加载中…</div>
+        <a class="hud-link" href="/scan.html?auto=1">扫描照片</a>
+      </div>
+    </div>
+  </div>
+
+  <div id="view-map" class="view">
+    <div id="map"></div>
+  </div>
+
+  <div id="view-album" class="view" hidden>
+    <div id="albumGrid" class="album-grid"></div>
+    <p class="album-empty" id="albumEmpty" hidden>暂无照片</p>
+  </div>
+
+  <div id="view-slideshow" class="view" hidden>
+    <div class="ss-bg" id="ssBg"></div>
+    <div class="ss-stage" id="ssStage">
+      <div class="ss-frame">
+        <img class="ss-img is-shown" id="ssImgA" alt="" />
+        <img class="ss-img" id="ssImgB" alt="" />
+      </div>
+      <div class="ss-bar" id="ssBar">
+        <button type="button" class="ss-toggle" id="ssToggle" aria-label="暂停">暂停</button>
+        <span class="ss-counter" id="ssCounter">0 / 0</span>
+        <span class="ss-caption" id="ssCaption"></span>
+      </div>
+    </div>
+    <canvas class="ss-aura" id="ssAura" aria-hidden="true"></canvas>
+    <div class="ss-fx-panel" id="ssFxPanel" title="音乐视觉特效">
+      <button type="button" class="ss-fx-btn" data-fx="aura">光晕</button>
+      <button type="button" class="ss-fx-btn" data-fx="particles">粒子</button>
+      <button type="button" class="ss-fx-btn" data-fx="breathe">呼吸</button>
+      <button type="button" class="ss-fx-btn" data-fx="wave">波形</button>
+    </div>
+    <div class="ss-chrome">
+      <button type="button" class="ss-nav ss-prev" id="ssPrev" aria-label="上一张">‹</button>
+      <button type="button" class="ss-nav ss-next" id="ssNext" aria-label="下一张">›</button>
+    </div>
+
+    <button type="button" class="ss-player" id="ssPlayer" aria-label="音乐播放器" title="点击播放 / 暂停">
+      <span class="ss-vinyl">
+        <img src="static/imgs/1.png" alt="" draggable="false" />
+      </span>
+      <span class="ss-arm">
+        <img src="static/imgs/2.png" alt="" draggable="false" />
+      </span>
+    </button>
+    <audio id="ssAudio" loop preload="metadata" src="static/music/1.mp3"></audio>
+  </div>
+
+  <div id="loading">
+    <div class="spinner"></div>
+    <p id="loadingText">正在加载索引…</p>
+  </div>
+
+  <div id="lightbox" hidden>
+    <button type="button" class="lb-close" id="lbClose" aria-label="关闭">×</button>
+    <button type="button" class="lb-nav lb-prev" id="lbPrev" aria-label="上一张">‹</button>
+    <button type="button" class="lb-nav lb-next" id="lbNext" aria-label="下一张">›</button>
+    <div class="lb-stage" id="lbStage">
+      <img id="lbImg" alt="" />
+    </div>
+    <div class="lb-caption" id="lbCaption"></div>
+    <div class="lb-strip" id="lbStrip"></div>
+  </div>
+
+  <script src="lib/leaflet.js"></script>
+  <script src="lib/leaflet.markercluster.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

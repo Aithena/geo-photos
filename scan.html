@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>扫描照片 — Geo Photos</title>
+  <link rel="stylesheet" href="scan.css" />
+</head>
+<body>
+  <main class="panel">
+    <header>
+      <div class="brand">Geo Photos</div>
+      <h1 id="title">准备扫描</h1>
+      <p class="sub" id="subtitle">新图放 inbox/ → 有定位进 photos/，无定位进 no-gps/</p>
+    </header>
+
+    <div class="progress-wrap">
+      <div class="bar" aria-hidden="true">
+        <div class="fill" id="fill"></div>
+      </div>
+      <div class="pct" id="pct">0%</div>
+    </div>
+
+    <p class="file" id="fileText">等待开始…</p>
+
+    <dl class="stats" id="stats">
+      <div><dt>已处理</dt><dd id="sScanned">0</dd></div>
+      <div><dt>跳过</dt><dd id="sSkipped">0</dd></div>
+      <div><dt>更新</dt><dd id="sUpdated">0</dd></div>
+      <div><dt>移出</dt><dd id="sMoved">0</dd></div>
+      <div><dt>清理</dt><dd id="sRemoved">0</dd></div>
+      <div><dt>出错</dt><dd id="sErrors">0</dd></div>
+      <div><dt>耗时</dt><dd id="sElapsed">0s</dd></div>
+    </dl>
+
+    <div class="actions">
+      <button type="button" class="btn primary" id="btnStart">开始扫描</button>
+      <button type="button" class="btn" id="btnForce" title="忽略增量，全量重扫">强制全量</button>
+      <a class="btn ghost" id="btnMap" href="/">查看地图</a>
+    </div>
+
+    <p class="hint" id="hint">
+      新图请放入 <code>inbox/</code>。扫描会先分流到 <code>photos/</code>（有定位）或 <code>no-gps/</code>（无定位），再索引地图。
+    </p>
+  </main>
+
+  <div class="modal" id="forceModal" hidden>
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="forceBody">
+      <p class="modal-body" id="forceBody">
+        将忽略增量缓存，重新读取全部图片的 EXIF 并生成缩略图。照片很多时会明显更慢。
+      </p>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="forceCancel" data-close>取消</button>
+        <button type="button" class="btn warn" id="forceConfirm">开始全量扫描</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="scan.js"></script>
+</body>
+</html>

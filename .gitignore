@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.Python
+.venv/
+venv/
+data/photos.db
+data/photos.db-journal
+data/manifest.json
+data/shards/
+thumbs/
+.DS_Store
+Thumbs.db
