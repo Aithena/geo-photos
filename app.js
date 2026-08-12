@@ -5,9 +5,23 @@
 
   const viewMap = document.getElementById("view-map");
   const viewAlbum = document.getElementById("view-album");
+  const viewTimeline = document.getElementById("view-timeline");
+  const viewJourney = document.getElementById("view-journey");
+  const viewPlaces = document.getElementById("view-places");
   const viewSlideshow = document.getElementById("view-slideshow");
   const albumGrid = document.getElementById("albumGrid");
   const albumEmpty = document.getElementById("albumEmpty");
+  const timelineScroll = document.getElementById("timelineScroll");
+  const timelineEmpty = document.getElementById("timelineEmpty");
+  const journeySide = document.getElementById("journeySide");
+  const journeyStrip = document.getElementById("journeyStrip");
+  const placesSide = document.getElementById("placesSide");
+  const placesGrid = document.getElementById("placesGrid");
+  const placesEmpty = document.getElementById("placesEmpty");
+  const placesHead = document.getElementById("placesHead");
+  const placesBack = document.getElementById("placesBack");
+  const placesTitle = document.getElementById("placesTitle");
+  const placesCount = document.getElementById("placesCount");
 
   const lightbox = document.getElementById("lightbox");
   const lbImg = document.getElementById("lbImg");
@@ -49,7 +63,27 @@
   let photoCount = 0;
   let mode = "map";
   let albumBuilt = false;
+  let timelineBuilt = false;
+  let placesBuilt = false;
   let reflowHud = () => {};
+
+  /** @type {Array<{key:string,label:string,photos:any[]}>} */
+  let journeyDays = [];
+  let journeyDayIndex = 0;
+  let journeyMap = null;
+  let journeyLayer = null;
+  let journeyMarkers = [];
+  let journeyAnim = 0;
+  /** @type {Array<{marker:any,phase:number}>} */
+  let journeyArrows = [];
+  /** @type {any[]} */
+  let journeyFlyLines = [];
+  /** @type {Array<[number,number]>|null} */
+  let journeyRouteLatLngs = null;
+
+  /** @type {Array<{key:string,label:string,photos:any[],cover:any}>} */
+  let placeAlbums = [];
+  let activePlaceKey = null;
 
   let lbIndex = 0;
   let lbStripBuilt = false;
@@ -129,6 +163,12 @@
         (manifest.withoutGps ? ` · ${manifest.withoutGps} 张无 GPS` : "");
     } else if (mode === "album") {
       statsText.textContent = `相册 ${n} 张`;
+    } else if (mode === "timeline") {
+      statsText.textContent = `时间线 ${n} 张`;
+    } else if (mode === "journey") {
+      statsText.textContent = `旅程 ${journeyDays.length} 天 · ${n} 张`;
+    } else if (mode === "places") {
+      statsText.textContent = `地点 ${placeAlbums.length} 个 · ${n} 张`;
     } else {
       statsText.textContent = ssPlaying ? `幻灯片播放中 · ${n} 张` : `幻灯片已暂停 · ${n} 张`;
     }
@@ -156,6 +196,8 @@
     if (added) {
       allPhotos = sortPhotos([...mapByKey.values()]);
       albumBuilt = false;
+      timelineBuilt = false;
+      placesBuilt = false;
       lbStripBuilt = false;
     }
   }
@@ -255,6 +297,604 @@
     albumGrid.appendChild(frag);
     albumBuilt = true;
   }
+
+  function openPhotoLightbox(photo) {
+    const idx = allPhotos.findIndex((p) => photoKey(p) === photoKey(photo));
+    if (idx >= 0) showLightbox(idx);
+  }
+
+  function dayKey(iso) {
+    if (!iso) return "未知日期";
+    return iso.slice(0, 10);
+  }
+
+  function formatDayTitle(key) {
+    if (key === "未知日期") return key;
+    const [y, m, d] = key.split("-");
+    return `${y}年${Number(m)}月${Number(d)}日`;
+  }
+
+  function weekdayLabel(key) {
+    if (key === "未知日期") return "";
+    const d = new Date(`${key}T12:00:00`);
+    if (Number.isNaN(d.getTime())) return "";
+    return ["日", "一", "二", "三", "四", "五", "六"][d.getDay()];
+  }
+
+  // ---- Timeline ------------------------------------------------------------
+  function buildTimeline() {
+    timelineScroll.innerHTML = "";
+    if (!allPhotos.length) {
+      timelineEmpty.hidden = false;
+      timelineBuilt = true;
+      return;
+    }
+    timelineEmpty.hidden = true;
+
+    /** @type {Map<string, any[]>} */
+    const byDay = new Map();
+    for (const photo of allPhotos) {
+      const k = dayKey(photo.takenAt);
+      if (!byDay.has(k)) byDay.set(k, []);
+      byDay.get(k).push(photo);
+    }
+    const days = [...byDay.keys()].sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+    const frag = document.createDocumentFragment();
+    for (const key of days) {
+      const photos = byDay.get(key);
+      const section = document.createElement("section");
+      section.className = "tl-day";
+      const head = document.createElement("div");
+      head.className = "tl-day-head";
+      const wd = weekdayLabel(key);
+      head.innerHTML = `<span class="tl-date">${formatDayTitle(key)}${wd ? ` · 周${wd}` : ""}</span><span class="tl-meta">${photos.length} 张</span>`;
+      const row = document.createElement("div");
+      row.className = "tl-row";
+      photos.forEach((photo) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "tl-item";
+        btn.style.backgroundImage = `url("${photo.thumb || photo.path}")`;
+        btn.title = photoLabel(photo);
+        btn.addEventListener("click", () => openPhotoLightbox(photo));
+        row.appendChild(btn);
+      });
+      section.appendChild(head);
+      section.appendChild(row);
+      frag.appendChild(section);
+    }
+    timelineScroll.appendChild(frag);
+    timelineBuilt = true;
+  }
+
+  // ---- Journey -------------------------------------------------------------
+  function buildJourneyDays() {
+    /** @type {Map<string, any[]>} */
+    const byDay = new Map();
+    for (const photo of allPhotos) {
+      if (photo.lat == null || photo.lng == null) continue;
+      const k = dayKey(photo.takenAt);
+      if (!byDay.has(k)) byDay.set(k, []);
+      byDay.get(k).push(photo);
+    }
+    journeyDays = [...byDay.entries()]
+      .map(([key, photos]) => ({
+        key,
+        label: formatDayTitle(key),
+        photos: sortPhotos(photos),
+      }))
+      .sort((a, b) => (a.key < b.key ? 1 : a.key > b.key ? -1 : 0));
+  }
+
+  function ensureJourneyMap() {
+    if (journeyMap) return;
+    journeyMap = L.map("journeyMap", {
+      zoomControl: true,
+      attributionControl: true,
+    }).setView(FALLBACK_CENTER, 11);
+    L.tileLayer(
+      "https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}",
+      {
+        subdomains: ["1", "2", "3", "4"],
+        maxZoom: 18,
+        attribution: "&copy; 高德地图",
+      }
+    ).addTo(journeyMap);
+    journeyLayer = L.layerGroup().addTo(journeyMap);
+    journeyMap.on("zoomend", () => {
+      if (mode === "journey" && journeyRouteLatLngs?.length >= 2) {
+        rebuildJourneyFlyLinesOnly();
+      }
+    });
+  }
+
+  function renderJourneySide() {
+    journeySide.innerHTML = "";
+    const title = document.createElement("div");
+    title.className = "jn-side-title";
+    title.textContent = "按日旅程";
+    journeySide.appendChild(title);
+    if (!journeyDays.length) {
+      const empty = document.createElement("p");
+      empty.className = "jn-empty";
+      empty.textContent = "暂无带定位的日程";
+      journeySide.appendChild(empty);
+      return;
+    }
+    journeyDays.forEach((day, i) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "jn-day" + (i === journeyDayIndex ? " active" : "");
+      const cover = day.photos[0];
+      btn.innerHTML = `<span class="jn-day-cover" style="background-image:url('${cover.thumb || cover.path}')"></span><span class="jn-day-text"><strong>${day.label}</strong><span>${day.photos.length} 张 · 周${weekdayLabel(day.key) || "—"}</span></span>`;
+      btn.addEventListener("click", () => selectJourneyDay(i));
+      journeySide.appendChild(btn);
+    });
+  }
+
+  function selectJourneyDay(index) {
+    if (!journeyDays.length) return;
+    journeyDayIndex = Math.max(0, Math.min(journeyDays.length - 1, index));
+    renderJourneySide();
+    renderJourneyMap();
+    renderJourneyStrip();
+    setStats();
+  }
+
+  function clearJourneyFlow() {
+    if (journeyAnim) {
+      cancelAnimationFrame(journeyAnim);
+      journeyAnim = 0;
+    }
+    journeyArrows.forEach((a) => {
+      try {
+        journeyLayer?.removeLayer(a.marker);
+      } catch (_) {}
+    });
+    journeyArrows = [];
+    journeyFlyLines.forEach((line) => {
+      try {
+        journeyLayer?.removeLayer(line);
+      } catch (_) {}
+    });
+    journeyFlyLines = [];
+  }
+
+  function journeyBearing(a, b) {
+    const toRad = Math.PI / 180;
+    const lat1 = a.lat * toRad;
+    const lat2 = b.lat * toRad;
+    const dLng = (b.lng - a.lng) * toRad;
+    const y = Math.sin(dLng) * Math.cos(lat2);
+    const x =
+      Math.cos(lat1) * Math.sin(lat2) -
+      Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+    return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+  }
+
+  /** 屏幕空间二次贝塞尔飞线（迁徙图弧度） */
+  function journeyArcPoints(aLL, bLL, segments = 36) {
+    const a = L.latLng(aLL);
+    const b = L.latLng(bLL);
+    const p1 = journeyMap.latLngToLayerPoint(a);
+    const p2 = journeyMap.latLngToLayerPoint(b);
+    const dx = p2.x - p1.x;
+    const dy = p2.y - p1.y;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1;
+    const mx = (p1.x + p2.x) / 2;
+    const my = (p1.y + p2.y) / 2;
+    // 弧高：短距也有弧，长距有上限，接近高德飞线
+    const bulge = Math.max(18, Math.min(120, len * 0.28));
+    const cx = mx - (dy / len) * bulge;
+    const cy = my + (dx / len) * bulge;
+    const pts = [];
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const u = 1 - t;
+      const x = u * u * p1.x + 2 * u * t * cx + t * t * p2.x;
+      const y = u * u * p1.y + 2 * u * t * cy + t * t * p2.y;
+      pts.push(journeyMap.layerPointToLatLng(L.point(x, y)));
+    }
+    return pts;
+  }
+
+  function buildJourneyCurvedPath(stops) {
+    /** @type {L.LatLng[]} */
+    const curved = [];
+    for (let i = 1; i < stops.length; i++) {
+      const arc = journeyArcPoints(stops[i - 1], stops[i], 40);
+      if (i > 1) arc.shift(); // 去重接点
+      curved.push(...arc);
+    }
+    return curved;
+  }
+
+  function journeyPathLength(latlngs) {
+    let total = 0;
+    for (let i = 1; i < latlngs.length; i++) {
+      total += L.latLng(latlngs[i - 1]).distanceTo(L.latLng(latlngs[i]));
+    }
+    return total;
+  }
+
+  function journeyPointAlong(latlngs, distM) {
+    let left = distM;
+    for (let i = 1; i < latlngs.length; i++) {
+      const a = L.latLng(latlngs[i - 1]);
+      const b = L.latLng(latlngs[i]);
+      const seg = a.distanceTo(b);
+      if (left <= seg || i === latlngs.length - 1) {
+        const t = seg > 0 ? Math.min(1, left / seg) : 0;
+        return {
+          latlng: L.latLng(
+            a.lat + (b.lat - a.lat) * t,
+            a.lng + (b.lng - a.lng) * t
+          ),
+          bearing: journeyBearing(a, b),
+        };
+      }
+      left -= seg;
+    }
+    const last = L.latLng(latlngs[latlngs.length - 1]);
+    const prev = L.latLng(latlngs[latlngs.length - 2] || latlngs[0]);
+    return { latlng: last, bearing: journeyBearing(prev, last) };
+  }
+
+  function rebuildJourneyFlyLinesOnly() {
+    if (!journeyRouteLatLngs || journeyRouteLatLngs.length < 2 || !journeyMap) return;
+    // 只重建飞线与箭头，保留照片 marker
+    journeyFlyLines.forEach((line) => {
+      try {
+        journeyLayer.removeLayer(line);
+      } catch (_) {}
+    });
+    journeyFlyLines = [];
+    journeyArrows.forEach((a) => {
+      try {
+        journeyLayer.removeLayer(a.marker);
+      } catch (_) {}
+    });
+    journeyArrows = [];
+    if (journeyAnim) {
+      cancelAnimationFrame(journeyAnim);
+      journeyAnim = 0;
+    }
+    startJourneyFlyLines(journeyRouteLatLngs);
+  }
+
+  function startJourneyFlyLines(stops) {
+    if (!journeyMap || stops.length < 2) return;
+    journeyRouteLatLngs = stops.map((p) => [p[0], p[1]]);
+    const curved = buildJourneyCurvedPath(journeyRouteLatLngs);
+    if (curved.length < 2) return;
+
+    // 2px 飞线，颜色与箭头一致（青蓝），带轻柔光
+    const arrowColor = "#7aecff";
+    const n = curved.length - 1;
+    for (let i = 0; i < n; i++) {
+      const t = i / Math.max(1, n - 1);
+      const aLine = 0.95 * (1 - t * 0.35);
+      const aGlow = 0.35 * (1 - t * 0.45);
+
+      const glow = L.polyline([curved[i], curved[i + 1]], {
+        color: arrowColor,
+        weight: 4,
+        opacity: Math.max(0.08, aGlow),
+        className: "jn-fly-glow",
+        lineCap: "round",
+        lineJoin: "round",
+        interactive: false,
+      }).addTo(journeyLayer);
+
+      const core = L.polyline([curved[i], curved[i + 1]], {
+        color: arrowColor,
+        weight: 2,
+        opacity: Math.max(0.45, aLine),
+        className: "jn-fly-core",
+        lineCap: "round",
+        lineJoin: "round",
+        interactive: false,
+      }).addTo(journeyLayer);
+
+      journeyFlyLines.push(glow, core);
+    }
+
+    const total = journeyPathLength(curved);
+    if (total < 1) return;
+
+    const count = Math.max(3, Math.min(12, Math.round(total / 500) + 2));
+    for (let i = 0; i < count; i++) {
+      const icon = L.divIcon({
+        className: "jn-arrow",
+        html: '<div class="jn-arrow-inner"><svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true"><polyline points="3,2 9,6 3,10" fill="none" stroke="#e8ffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>',
+        iconSize: [14, 14],
+        iconAnchor: [7, 7],
+      });
+      const marker = L.marker(curved[0], {
+        icon,
+        interactive: false,
+        keyboard: false,
+        zIndexOffset: 400,
+      }).addTo(journeyLayer);
+      journeyArrows.push({ marker, phase: i / count });
+    }
+
+    for (let i = 0; i < Math.min(5, count); i++) {
+      const icon = L.divIcon({
+        className: "jn-spark",
+        html: '<div class="jn-spark-inner"></div>',
+        iconSize: [10, 10],
+        iconAnchor: [5, 5],
+      });
+      const marker = L.marker(curved[0], {
+        icon,
+        interactive: false,
+        keyboard: false,
+        zIndexOffset: 350,
+      }).addTo(journeyLayer);
+      journeyArrows.push({ marker, phase: (i + 0.35) / count, spark: true });
+    }
+
+    const t0 = performance.now();
+    const speed = 0.035;
+    function frame(now) {
+      const t = ((now - t0) / 1000) * speed;
+      journeyArrows.forEach((a) => {
+        const u = (a.phase + t) % 1;
+        const pt = journeyPointAlong(curved, u * total);
+        a.marker.setLatLng(pt.latlng);
+        if (!a.spark) {
+          const el = a.marker.getElement()?.querySelector(".jn-arrow-inner");
+          if (el) el.style.transform = `rotate(${pt.bearing - 90}deg)`;
+        }
+      });
+      journeyAnim = requestAnimationFrame(frame);
+    }
+    journeyAnim = requestAnimationFrame(frame);
+  }
+
+  function renderJourneyMap() {
+    ensureJourneyMap();
+    clearJourneyFlow();
+    journeyLayer.clearLayers();
+    journeyMarkers = [];
+    journeyRouteLatLngs = null;
+    const day = journeyDays[journeyDayIndex];
+    if (!day) return;
+    const latlngs = day.photos.map((p) => [p.lat, p.lng]);
+    if (latlngs.length >= 2) {
+      startJourneyFlyLines(latlngs);
+    }
+    day.photos.forEach((photo, i) => {
+      const icon = L.divIcon({
+        className: "jn-pin",
+        html: `<div class="jn-pin-ring"></div><div class="jn-pin-core" style="background-image:url('${photo.thumb || photo.path}')"></div>`,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
+      });
+      const marker = L.marker([photo.lat, photo.lng], { icon });
+      marker.on("click", () => {
+        openPhotoLightbox(photo);
+        highlightJourneyStrip(i);
+      });
+      marker.addTo(journeyLayer);
+      journeyMarkers.push(marker);
+    });
+    if (latlngs.length === 1) {
+      journeyMap.setView(latlngs[0], 14);
+    } else if (latlngs.length > 1) {
+      journeyMap.fitBounds(latlngs, { padding: [48, 48], maxZoom: 15 });
+    }
+    setTimeout(() => {
+      journeyMap.invalidateSize();
+      if (latlngs.length >= 2) rebuildJourneyFlyLinesOnly();
+    }, 80);
+  }
+
+  function highlightJourneyStrip(index) {
+    journeyStrip.querySelectorAll(".jn-strip-item").forEach((el, i) => {
+      el.classList.toggle("active", i === index);
+    });
+  }
+
+  function renderJourneyStrip() {
+    journeyStrip.innerHTML = "";
+    const day = journeyDays[journeyDayIndex];
+    if (!day) return;
+    day.photos.forEach((photo, i) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "jn-strip-item";
+      btn.style.backgroundImage = `url("${photo.thumb || photo.path}")`;
+      btn.title = photoLabel(photo);
+      btn.addEventListener("click", () => {
+        openPhotoLightbox(photo);
+        highlightJourneyStrip(i);
+        if (journeyMarkers[i]) {
+          journeyMap.panTo(journeyMarkers[i].getLatLng());
+        }
+      });
+      journeyStrip.appendChild(btn);
+    });
+  }
+
+  function buildJourney() {
+    buildJourneyDays();
+    ensureJourneyMap();
+    journeyDayIndex = 0;
+    renderJourneySide();
+    selectJourneyDay(0);
+  }
+
+  // ---- Places --------------------------------------------------------------
+  let placeResolveGen = 0;
+
+  function escapeHtml(s) {
+    return String(s ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function placeCellKey(photo) {
+    const lat = Math.round(Number(photo.lat) * 20) / 20; // ~5.5km
+    const lng = Math.round(Number(photo.lng) * 20) / 20;
+    return `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  }
+
+  function placeMetaLine(album) {
+    const bits = [];
+    if (album.address && album.address !== album.label) bits.push(album.address);
+    bits.push(`${album.photos.length} 张`);
+    return bits.join(" · ");
+  }
+
+  function buildPlaceAlbums() {
+    /** @type {Map<string, any[]>} */
+    const groups = new Map();
+    for (const photo of allPhotos) {
+      if (photo.lat == null || photo.lng == null) continue;
+      const k = placeCellKey(photo);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(photo);
+    }
+    placeAlbums = [...groups.entries()]
+      .map(([key, photos]) => {
+        const sorted = sortPhotos(photos);
+        const [lat, lng] = key.split(",").map(Number);
+        return {
+          key,
+          lat,
+          lng,
+          label: `地点 ${lat.toFixed(2)}°, ${lng.toFixed(2)}°`,
+          address: "",
+          resolved: false,
+          photos: sorted,
+          cover: sorted[Math.floor(sorted.length / 2)] || sorted[0],
+        };
+      })
+      .sort((a, b) => b.photos.length - a.photos.length);
+  }
+
+  function refreshPlacesLabels() {
+    if (!placesBuilt) return;
+    renderPlacesList();
+    if (activePlaceKey) {
+      const album = placeAlbums.find((a) => a.key === activePlaceKey);
+      if (album) {
+        placesTitle.textContent = album.label;
+        placesCount.textContent = placeMetaLine(album);
+      }
+    } else {
+      placesGrid.querySelectorAll(".album-item[data-place-key]").forEach((el) => {
+        const album = placeAlbums.find((a) => a.key === el.dataset.placeKey);
+        if (album) el.title = `${album.label} · ${placeMetaLine(album)}`;
+      });
+    }
+  }
+
+  async function resolvePlaceLabels() {
+    const gen = ++placeResolveGen;
+    for (const album of placeAlbums) {
+      if (gen !== placeResolveGen) return;
+      if (album.resolved) continue;
+      try {
+        const res = await fetch(
+          `/api/geocode/reverse?lat=${encodeURIComponent(album.lat)}&lng=${encodeURIComponent(album.lng)}`
+        );
+        if (!res.ok) continue;
+        const data = await res.json();
+        if (gen !== placeResolveGen) return;
+        if (data.label) album.label = data.label;
+        if (data.address) album.address = data.address;
+        album.resolved = Boolean(data.ok || data.label);
+        refreshPlacesLabels();
+      } catch {
+        /* 保持坐标占位 */
+      }
+    }
+  }
+
+  function renderPlacesList() {
+    placesSide.innerHTML = "";
+    const title = document.createElement("div");
+    title.className = "pl-side-title";
+    title.textContent = "地点相册";
+    placesSide.appendChild(title);
+    if (!placeAlbums.length) {
+      placesEmpty.hidden = false;
+      placesGrid.innerHTML = "";
+      placesHead.hidden = true;
+      return;
+    }
+    placesEmpty.hidden = true;
+    placeAlbums.forEach((album) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "pl-card" + (album.key === activePlaceKey ? " active" : "");
+      btn.innerHTML = `<span class="pl-card-cover" style="background-image:url('${album.cover.thumb || album.cover.path}')"></span><span class="pl-card-text"><strong>${escapeHtml(album.label)}</strong><span>${escapeHtml(placeMetaLine(album))}</span></span>`;
+      btn.addEventListener("click", () => openPlaceAlbum(album.key));
+      placesSide.appendChild(btn);
+    });
+  }
+
+  function openPlaceAlbum(key) {
+    const album = placeAlbums.find((a) => a.key === key);
+    if (!album) return;
+    activePlaceKey = key;
+    renderPlacesList();
+    placesHead.hidden = false;
+    placesTitle.textContent = album.label;
+    placesCount.textContent = placeMetaLine(album);
+    placesGrid.innerHTML = "";
+    const frag = document.createDocumentFragment();
+    album.photos.forEach((photo) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "album-item";
+      btn.style.backgroundImage = `url("${photo.thumb || photo.path}")`;
+      btn.title = photoLabel(photo);
+      btn.addEventListener("click", () => openPhotoLightbox(photo));
+      frag.appendChild(btn);
+    });
+    placesGrid.appendChild(frag);
+    placesEmpty.hidden = true;
+  }
+
+  function showPlacesOverview() {
+    activePlaceKey = null;
+    placesHead.hidden = true;
+    placesGrid.innerHTML = "";
+    renderPlacesList();
+    if (!placeAlbums.length) {
+      placesEmpty.hidden = false;
+      placesEmpty.textContent = "暂无地点相册";
+    } else {
+      placesEmpty.hidden = true;
+      const frag = document.createDocumentFragment();
+      placeAlbums.forEach((album) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "album-item";
+        btn.dataset.placeKey = album.key;
+        btn.style.backgroundImage = `url("${album.cover.thumb || album.cover.path}")`;
+        btn.title = `${album.label} · ${placeMetaLine(album)}`;
+        btn.addEventListener("click", () => openPlaceAlbum(album.key));
+        frag.appendChild(btn);
+      });
+      placesGrid.appendChild(frag);
+    }
+  }
+
+  function buildPlaces() {
+    buildPlaceAlbums();
+    showPlacesOverview();
+    placesBuilt = true;
+    resolvePlaceLabels();
+  }
+
+  placesBack?.addEventListener("click", () => showPlacesOverview());
 
   // ---- Slideshow -----------------------------------------------------------
   function clearSsTimer() {
@@ -401,6 +1041,8 @@
   let particleCounts = { orbit: 0, ember: 0, burst: 0 };
   const PARTICLE_MAX = 520;
   const ORBIT_WANT = 52;
+  /** @type {HTMLCanvasElement | null} */
+  let breatheOff = null;
 
   function clearParticles() {
     particles.length = 0;
@@ -712,19 +1354,19 @@
     ctx.fillRect(0, h - rise * 0.95, w, rise);
     ctx.globalAlpha = 1;
 
-    // 2) 多层极光丝带：用填充带代替描边，上下透明，无硬边
+    // 2) 多层极光绸带：上下透明渐变，随音乐起伏
     function drawRibbon(phase, yLift, height, alphaScale, hueIdx) {
       const top = [];
       const bot = [];
-      const thickMax = Math.min(14, height);
+      const thickMax = Math.min(28, Math.max(8, height));
       for (let i = 0; i <= steps; i++) {
         const t = i / steps;
         const x = t * w;
         const y = ridgeY(t, phase) - yLift;
         const thick =
           thickMax *
-          (0.55 + 0.45 * Math.sin(t * Math.PI)) *
-          (0.7 + bass * 0.5);
+          (0.5 + 0.5 * Math.sin(t * Math.PI)) *
+          (0.75 + bass * 0.45);
         top.push([x, y - thick * 0.55]);
         bot.push([x, y + thick * 0.55]);
       }
@@ -735,23 +1377,46 @@
       for (let i = bot.length - 1; i >= 0; i--) ctx.lineTo(bot[i][0], bot[i][1]);
       ctx.closePath();
 
-      const midY = ridgeY(0.5, phase);
+      const midY = ridgeY(0.5, phase) - yLift;
       const rg = ctx.createLinearGradient(0, midY - thickMax, 0, midY + thickMax);
       const cA = colors[hueIdx % colors.length];
       const cB = colors[(hueIdx + 1) % colors.length];
-      const a = (0.12 + energy * 0.2) * alphaScale;
+      const cC = colors[(hueIdx + 2) % colors.length];
+      const a = (0.16 + energy * 0.28) * alphaScale;
       rg.addColorStop(0, "rgba(0,0,0,0)");
-      rg.addColorStop(0.35, cA.replace("alpha", String(a * 0.55)));
+      rg.addColorStop(0.28, cA.replace("alpha", String(a * 0.45)));
       rg.addColorStop(0.5, cB.replace("alpha", String(a)));
-      rg.addColorStop(0.65, cA.replace("alpha", String(a * 0.5)));
+      rg.addColorStop(0.72, cC.replace("alpha", String(a * 0.5)));
       rg.addColorStop(1, "rgba(0,0,0,0)");
       ctx.fillStyle = rg;
       ctx.fill();
+
+      // 横向流色，增强绸带感（重新建路径再 clip）
+      ctx.beginPath();
+      ctx.moveTo(top[0][0], top[0][1]);
+      for (let i = 1; i < top.length; i++) ctx.lineTo(top[i][0], top[i][1]);
+      for (let i = bot.length - 1; i >= 0; i--) ctx.lineTo(bot[i][0], bot[i][1]);
+      ctx.closePath();
+      const hg = ctx.createLinearGradient(0, 0, w, 0);
+      hg.addColorStop(0, cA.replace("alpha", String(a * 0.2)));
+      hg.addColorStop(0.35, cB.replace("alpha", String(a * 0.45)));
+      hg.addColorStop(0.7, cC.replace("alpha", String(a * 0.4)));
+      hg.addColorStop(1, cA.replace("alpha", String(a * 0.2)));
+      ctx.save();
+      ctx.clip();
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle = hg;
+      ctx.fillRect(0, midY - thickMax - 8, w, thickMax * 2 + 16);
+      ctx.restore();
     }
 
-    drawRibbon(0.2, 2, 10 + bass * 6, 1.0, 0);
-    drawRibbon(1.1, 6, 7 + mid * 5, 0.75, 2);
-    drawRibbon(2.0, -2, 6 + energy * 4, 0.55, 1);
+    drawRibbon(0.2, 2, 11 + bass * 7, 1.0, 0);
+    drawRibbon(1.1, 6, 9 + mid * 6, 0.8, 2);
+    drawRibbon(2.0, -2, 8 + energy * 5, 0.65, 1);
+    // 再加 3 条起伏渐变绸带
+    drawRibbon(2.7, 14, 14 + bass * 9, 1.0, 3);
+    drawRibbon(3.5, -8, 12 + mid * 8, 0.9, 1);
+    drawRibbon(4.3, 20, 11 + energy * 7, 0.8, 2);
 
     // 3) 底部脉冲柔光团（鼓点呼吸）
     const blobs = [
@@ -786,34 +1451,45 @@
     if (!audioWave || !audioAnalyser) return;
     audioAnalyser.getByteTimeDomainData(audioWave);
 
-    const span = Math.min(400, w * 0.9);
+    const span = w * 0.5; // 50vw
     const left = (w - span) / 2;
-    // 色块最大半高约 42；再下移 20px
-    const midY = h - 20 - 42 + 20;
-    const amp = 18 + auraSmooth.energy * 36;
+    const maxBh = 50;
+    // 振幅到底：最大时下尖贴屏幕底（距底 0px）
+    const midY = h - maxBh;
+    const amp = Math.min(maxBh, 18 + auraSmooth.energy * 32);
 
     ctx.globalCompositeOperation = "lighter";
     ctx.shadowBlur = 0;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
-    const bars = 48;
-    const gap = 0;
-    const barW = span / bars;
+    // 色块区：相对波浪线两端各内缩 5px，避免端头竖条
+    const barPad = 5;
+    const barSpan = Math.max(0, span - barPad * 2);
+    const barLeft = left + barPad;
+    const barPx = 2;
+    const bars = Math.max(1, Math.floor(barSpan / barPx));
+    const hw = barPx / 2;
     for (let i = 0; i < bars; i++) {
       const idx = Math.floor((i / bars) * audioFreq.length * 0.7);
       const v = (audioFreq[idx] || 0) / 255;
-      const bh = Math.max(3, v * (32 + auraSmooth.mid * 40));
-      const x = left + i * (barW + gap);
+      const bh = Math.max(4, Math.min(maxBh, v * maxBh));
+      const cx = barLeft + i * barPx + hw;
       const hue = (i / bars) * 360;
-      const g = ctx.createLinearGradient(x, midY - bh, x, midY + bh);
-      g.addColorStop(0, `hsla(${hue}, 95%, 68%, 0)`);
-      g.addColorStop(0.25, `hsla(${hue}, 95%, 65%, ${0.2 + v * 0.3})`);
-      g.addColorStop(0.5, `hsla(${(hue + 25) % 360}, 92%, 70%, ${0.4 + v * 0.45})`);
-      g.addColorStop(0.75, `hsla(${hue}, 95%, 65%, ${0.2 + v * 0.3})`);
-      g.addColorStop(1, `hsla(${hue}, 90%, 72%, 0)`);
+      const g = ctx.createLinearGradient(cx, midY - bh, cx, midY + bh);
+      g.addColorStop(0, `hsla(${hue}, 95%, 70%, 0)`);
+      g.addColorStop(0.22, `hsla(${hue}, 95%, 68%, ${0.18 + v * 0.28})`);
+      g.addColorStop(0.5, `hsla(${(hue + 30) % 360}, 92%, 72%, ${0.42 + v * 0.45})`);
+      g.addColorStop(0.78, `hsla(${hue}, 95%, 68%, ${0.18 + v * 0.28})`);
+      g.addColorStop(1, `hsla(${hue}, 90%, 70%, 0)`);
       ctx.fillStyle = g;
-      ctx.fillRect(x, midY - bh, barW, bh * 2);
+      ctx.beginPath();
+      ctx.moveTo(cx, midY - bh);
+      ctx.lineTo(cx + hw, midY);
+      ctx.lineTo(cx, midY + bh);
+      ctx.lineTo(cx - hw, midY);
+      ctx.closePath();
+      ctx.fill();
     }
 
     function strokeWave(alpha, width) {
@@ -838,28 +1514,66 @@
     if (!fxEnabled.breathe || !musicOn) return;
 
     const pulse = auraSmooth.bass * 0.7 + auraSmooth.energy * 0.3;
-    // 吸气（向中心推进）/ 呼气（收回边缘）
     const cycle = 0.5 + 0.5 * Math.sin(auraT * 1.55);
-    const depth = 22 + cycle * 28 + pulse * 36;
-    const a = 0.28 + pulse * 0.32 + cycle * 0.1;
-    const hue = 200 + Math.sin(auraT * 0.3) * 18;
+    // 向中心「吸气」推进的厚度（保持原效果的 30% 宽度）
+    const depth = (26 + cycle * 34 + pulse * 42) * 0.3;
+    const alpha = (0.5 + pulse * 0.4 + cycle * 0.12) * 0.5;
+    const hueShift = auraT * 55;
 
-    ctx.globalCompositeOperation = "lighter";
+    if (!breatheOff || breatheOff.width !== Math.ceil(w) || breatheOff.height !== Math.ceil(h)) {
+      breatheOff = document.createElement("canvas");
+      breatheOff.width = Math.max(1, Math.ceil(w));
+      breatheOff.height = Math.max(1, Math.ceil(h));
+    }
+    const o = breatheOff.getContext("2d");
+    if (!o) return;
+    o.setTransform(1, 0, 0, 1, 0, 0);
+    o.clearRect(0, 0, w, h);
 
-    function softBand(x0, y0, x1, y1, x, y, bw, bh) {
-      const g = ctx.createLinearGradient(x0, y0, x1, y1);
-      g.addColorStop(0, `hsla(${hue}, 45%, 78%, ${a})`);
-      g.addColorStop(0.35, `hsla(${hue}, 50%, 72%, ${a * 0.45})`);
-      g.addColorStop(0.7, `hsla(${hue}, 55%, 70%, ${a * 0.12})`);
-      g.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = g;
-      ctx.fillRect(x, y, bw, bh);
+    const cx = w * 0.5;
+    const cy = h * 0.5;
+    const R = Math.hypot(cx, cy) + 2;
+
+    // 整屏锥形七彩（高饱和），后续挖空中心 → 无四角接缝
+    const wedges = 64;
+    for (let i = 0; i < wedges; i++) {
+      const a0 = (i / wedges) * Math.PI * 2 - Math.PI * 0.5;
+      const a1 = ((i + 1.05) / wedges) * Math.PI * 2 - Math.PI * 0.5;
+      const hue = (i / wedges) * 360 + hueShift;
+      o.fillStyle = `hsla(${hue % 360}, 98%, 56%, 1)`;
+      o.beginPath();
+      o.moveTo(cx, cy);
+      o.arc(cx, cy, R, a0, a1);
+      o.closePath();
+      o.fill();
     }
 
-    softBand(0, 0, 0, depth, 0, 0, w, depth); // top → center
-    softBand(0, h, 0, h - depth, 0, h - depth, w, depth); // bottom
-    softBand(0, 0, depth, 0, 0, 0, depth, h); // left
-    softBand(w, 0, w - depth, 0, w - depth, 0, depth, h); // right
+    // 柔边挖空中心：只留屏幕四周光环，角自然一体
+    o.globalCompositeOperation = "destination-out";
+    const blur = Math.max(2, depth * 0.45);
+    o.filter = `blur(${blur}px)`;
+    o.fillStyle = "#000";
+    const inset = Math.max(2, depth * 0.75);
+    const rr = Math.min(12, inset * 0.6);
+    o.beginPath();
+    if (typeof o.roundRect === "function") {
+      o.roundRect(inset, inset, w - inset * 2, h - inset * 2, rr);
+    } else {
+      o.rect(inset, inset, w - inset * 2, h - inset * 2);
+    }
+    o.fill();
+    o.filter = "none";
+    o.globalCompositeOperation = "source-over";
+
+    // 叠到主画布：轻微再模糊 + 呼吸透明度
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = alpha;
+    ctx.filter = `blur(${2 + pulse * 4}px)`;
+    ctx.drawImage(breatheOff, 0, 0);
+    ctx.filter = "none";
+    ctx.globalAlpha = 1;
+    ctx.restore();
   }
 
   function drawFxFrame() {
@@ -1133,11 +1847,21 @@
     const prev = mode;
     mode = next;
 
-    document.body.classList.remove("mode-map", "mode-album", "mode-slideshow");
+    document.body.classList.remove(
+      "mode-map",
+      "mode-album",
+      "mode-timeline",
+      "mode-journey",
+      "mode-places",
+      "mode-slideshow"
+    );
     document.body.classList.add(`mode-${mode}`);
 
     viewMap.hidden = mode !== "map";
     viewAlbum.hidden = mode !== "album";
+    viewTimeline.hidden = mode !== "timeline";
+    viewJourney.hidden = mode !== "journey";
+    viewPlaces.hidden = mode !== "places";
     viewSlideshow.hidden = mode !== "slideshow";
 
     document.querySelectorAll(".mode-btn").forEach((btn) => {
@@ -1147,13 +1871,24 @@
     });
 
     if (prev === "slideshow" && mode !== "slideshow") stopSlideshow();
-    if (mode !== "map" && mode !== "album") closeLightbox();
+    if (prev === "journey" && mode !== "journey") clearJourneyFlow();
+    if (mode === "slideshow") closeLightbox();
 
     if (mode === "map" && map) {
       setTimeout(() => map.invalidateSize(), 50);
     }
     if (mode === "album") {
       if (!albumBuilt) buildAlbum();
+    }
+    if (mode === "timeline") {
+      if (!timelineBuilt) buildTimeline();
+    }
+    if (mode === "journey") {
+      buildJourney();
+    }
+    if (mode === "places") {
+      if (!placesBuilt) buildPlaces();
+      else showPlacesOverview();
     }
     if (mode === "slideshow") {
       closeLightbox();

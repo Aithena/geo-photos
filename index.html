@@ -16,6 +16,9 @@
       <div class="mode-switch" role="tablist" aria-label="展现模式">
         <button type="button" class="mode-btn active" data-mode="map" role="tab" aria-selected="true">地图</button>
         <button type="button" class="mode-btn" data-mode="album" role="tab" aria-selected="false">相册</button>
+        <button type="button" class="mode-btn" data-mode="timeline" role="tab" aria-selected="false">时间线</button>
+        <button type="button" class="mode-btn" data-mode="journey" role="tab" aria-selected="false">旅程</button>
+        <button type="button" class="mode-btn" data-mode="places" role="tab" aria-selected="false">地点</button>
         <button type="button" class="mode-btn" data-mode="slideshow" role="tab" aria-selected="false">幻灯片</button>
       </div>
       <div class="hud-row">
@@ -32,6 +35,34 @@
   <div id="view-album" class="view" hidden>
     <div id="albumGrid" class="album-grid"></div>
     <p class="album-empty" id="albumEmpty" hidden>暂无照片</p>
+  </div>
+
+  <div id="view-timeline" class="view" hidden>
+    <div id="timelineScroll" class="tl-scroll"></div>
+    <p class="album-empty" id="timelineEmpty" hidden>暂无照片</p>
+  </div>
+
+  <div id="view-journey" class="view" hidden>
+    <aside class="jn-side" id="journeySide"></aside>
+    <div class="jn-map-wrap">
+      <div id="journeyMap"></div>
+      <div class="jn-strip" id="journeyStrip"></div>
+    </div>
+  </div>
+
+  <div id="view-places" class="view" hidden>
+    <div class="pl-layout">
+      <aside class="pl-side" id="placesSide"></aside>
+      <div class="pl-main">
+        <header class="pl-head" id="placesHead" hidden>
+          <button type="button" class="pl-back" id="placesBack">← 全部地点</button>
+          <h2 id="placesTitle"></h2>
+          <span id="placesCount"></span>
+        </header>
+        <div id="placesGrid" class="album-grid"></div>
+        <p class="album-empty" id="placesEmpty" hidden>暂无地点相册</p>
+      </div>
+    </div>
   </div>
 
   <div id="view-slideshow" class="view" hidden>
