@@ -9,7 +9,7 @@ pip install -r requirements.txt
 python scripts/serve.py --port 18809
 ```
 
-或双击 `scan.bat`：启动服务并打开**扫描进度界面**，完成后自动进入地图。
+或双击 `scan.bat`：启动服务并打开**扫描进度界面**，完成后可选择进入地图。
 
 - 扫描页：http://127.0.0.1:18809/scan.html
 - 地图：http://127.0.0.1:18809/
