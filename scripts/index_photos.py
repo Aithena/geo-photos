@@ -9,12 +9,13 @@ import json
 import math
 import shutil
 import sqlite3
-import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from PIL import Image, ImageOps, ExifTags
+
+from geocode import load_geocode_cache, reverse_geocode
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INBOX = ROOT / "inbox"       # 新下载图片入口
@@ -32,6 +33,39 @@ GEOHASH_PRECISION = 4  # ~39km cells；改图少时只重写相关分片
 # Pillow Exif GPS tags
 _GPS_TAGS = {v: k for k, v in ExifTags.GPSTAGS.items()} if hasattr(ExifTags, "GPSTAGS") else {}
 _EXIF_TAGS = {v: k for k, v in ExifTags.TAGS.items()}
+_EXIF_IFD = 0x8769  # Exif IFD
+_GPS_IFD = 0x8825
+
+# 库里保存的完整元数据列（地图分片仍只导出 path/thumb/lat/lng/takenAt）
+_META_COLUMNS = [
+    ("content_hash", "TEXT"),
+    ("width", "INTEGER"),
+    ("height", "INTEGER"),
+    ("orientation", "INTEGER"),
+    ("mime", "TEXT"),
+    ("make", "TEXT"),
+    ("model", "TEXT"),
+    ("tz_offset", "TEXT"),
+    ("taken_at_utc", "TEXT"),
+    ("gps_date", "TEXT"),
+    ("gps_time", "TEXT"),
+    ("altitude", "REAL"),
+    ("altitude_ref", "INTEGER"),
+    ("heading", "REAL"),
+    ("heading_ref", "TEXT"),
+    ("gps_h_error", "REAL"),
+    ("gps_dop", "REAL"),
+    ("city", "TEXT"),
+    ("district", "TEXT"),
+    ("country", "TEXT"),
+    ("road", "TEXT"),
+    ("place_label", "TEXT"),
+    ("place_address", "TEXT"),
+    ("place_provider", "TEXT"),
+    ("original_name", "TEXT"),
+    ("file_ctime", "TEXT"),
+    ("first_seen_at", "TEXT"),
+]
 
 
 def _ratio_to_float(x) -> float:
@@ -47,59 +81,252 @@ def _dms_to_deg(dms) -> float:
     return _ratio_to_float(d) + _ratio_to_float(m) / 60.0 + _ratio_to_float(s) / 3600.0
 
 
+def _as_str(v) -> str | None:
+    if v is None:
+        return None
+    if isinstance(v, bytes):
+        return v.decode("utf-8", "replace").strip("\x00").strip() or None
+    s = str(v).strip()
+    return s or None
+
+
+def _as_int(v) -> int | None:
+    if v is None or v == "":
+        return None
+    if isinstance(v, bytes):
+        v = v[0] if v else None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(v) -> float | None:
+    if v is None or v == "":
+        return None
+    try:
+        return _ratio_to_float(v)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _empty_to_none(v) -> str | None:
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _exif_get(exif, extra_ifds, name):
+    tid = _EXIF_TAGS.get(name)
+    if tid is None:
+        return None
+    for src in (exif, *extra_ifds):
+        if src is None:
+            continue
+        try:
+            if tid in src:
+                return src.get(tid)
+        except Exception:
+            continue
+    return None
+
+
+def _parse_datetime(raw) -> str | None:
+    s = _as_str(raw)
+    if not s or len(s) < 19:
+        return None
+    try:
+        return datetime.strptime(s[:19], "%Y:%m:%d %H:%M:%S").isoformat()
+    except ValueError:
+        return None
+
+
+def _parse_offset(raw) -> str | None:
+    s = _as_str(raw)
+    if not s:
+        return None
+    s = s.replace(" ", "")
+    if s[0] not in "+-" and len(s) >= 4:
+        s = "+" + s
+    return s
+
+
+def _offset_tz(offset: str | None):
+    if not offset:
+        return None
+    s = offset.strip()
+    sign = -1 if s.startswith("-") else 1
+    digits = s[1:] if s[:1] in "+-" else s
+    digits = digits.replace(":", "")
+    if len(digits) < 4:
+        return None
+    try:
+        hours, minutes = int(digits[:2]), int(digits[2:4])
+    except ValueError:
+        return None
+    return timezone(sign * timedelta(hours=hours, minutes=minutes))
+
+
+def _gps_time_str(ts) -> str | None:
+    if not ts or not isinstance(ts, (tuple, list)) or len(ts) < 3:
+        return None
+    try:
+        h = _ratio_to_float(ts[0])
+        m = _ratio_to_float(ts[1])
+        sec = _ratio_to_float(ts[2])
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    whole = int(sec)
+    frac = sec - whole
+    if frac:
+        return f"{int(h):02d}:{int(m):02d}:{whole:02d}{f'{frac:.3f}'[1:]}"
+    return f"{int(h):02d}:{int(m):02d}:{whole:02d}"
+
+
+def _compute_taken_at_utc(
+    taken_at: str | None,
+    tz_offset: str | None,
+    gps_date: str | None,
+    gps_time: str | None,
+) -> str | None:
+    if gps_date and gps_time:
+        stamp = f"{gps_date} {gps_time[:8]}"
+        try:
+            dt = datetime.strptime(stamp, "%Y:%m:%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            return dt.isoformat()
+        except ValueError:
+            pass
+    if taken_at:
+        try:
+            naive = datetime.fromisoformat(taken_at)
+        except ValueError:
+            return None
+        tz = _offset_tz(tz_offset)
+        if tz is not None:
+            return naive.replace(tzinfo=tz).astimezone(timezone.utc).isoformat()
+    return None
+
+
+def _file_sha256(path: Path) -> str | None:
+    h = hashlib.sha256()
+    try:
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _ts_iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
 def extract_exif(path: Path) -> dict:
-    """返回 lat, lng, taken_at (ISO) 或缺失字段为 None。"""
-    out = {"lat": None, "lng": None, "taken_at": None}
+    """读取文件与 EXIF：GPS、时间、机身、尺寸等。缺失字段为 None。"""
+    out = {
+        "lat": None,
+        "lng": None,
+        "taken_at": None,
+        "width": None,
+        "height": None,
+        "orientation": None,
+        "mime": None,
+        "make": None,
+        "model": None,
+        "tz_offset": None,
+        "taken_at_utc": None,
+        "gps_date": None,
+        "gps_time": None,
+        "altitude": None,
+        "altitude_ref": None,
+        "heading": None,
+        "heading_ref": None,
+        "gps_h_error": None,
+        "gps_dop": None,
+    }
     try:
         with Image.open(path) as im:
+            out["width"], out["height"] = im.size
+            if hasattr(im, "get_format_mimetype"):
+                out["mime"] = im.get_format_mimetype()
+            elif im.format:
+                out["mime"] = Image.MIME.get(im.format) or f"image/{im.format.lower()}"
+
             exif = im.getexif()
             if not exif:
                 return out
 
-            # 拍摄时间
-            for key in ("DateTimeOriginal", "DateTimeDigitized", "DateTime"):
-                tag_id = _EXIF_TAGS.get(key)
-                if tag_id and tag_id in exif:
-                    raw = exif.get(tag_id)
-                    if isinstance(raw, str) and len(raw) >= 19:
-                        try:
-                            dt = datetime.strptime(raw[:19], "%Y:%m:%d %H:%M:%S")
-                            out["taken_at"] = dt.isoformat()
-                            break
-                        except ValueError:
-                            pass
-
+            exif_ifd = None
             gps_ifd = None
             try:
-                gps_ifd = exif.get_ifd(0x8825)  # GPSInfo
+                exif_ifd = exif.get_ifd(_EXIF_IFD)
+            except Exception:
+                exif_ifd = None
+            try:
+                gps_ifd = exif.get_ifd(_GPS_IFD)
             except Exception:
                 gps_ifd = None
 
-            if not gps_ifd:
-                return out
+            extra = (exif_ifd,)
+            out["make"] = _as_str(_exif_get(exif, extra, "Make"))
+            out["model"] = _as_str(_exif_get(exif, extra, "Model"))
+            out["orientation"] = _as_int(_exif_get(exif, extra, "Orientation"))
 
-            def g(name):
-                tid = None
-                for k, v in ExifTags.GPSTAGS.items():
-                    if v == name:
-                        tid = k
-                        break
-                return gps_ifd.get(tid) if tid is not None else None
+            for key in ("DateTimeOriginal", "DateTimeDigitized", "DateTime"):
+                parsed = _parse_datetime(_exif_get(exif, extra, key))
+                if parsed:
+                    out["taken_at"] = parsed
+                    break
+            for key in ("OffsetTimeOriginal", "OffsetTimeDigitized", "OffsetTime"):
+                off = _parse_offset(_exif_get(exif, extra, key))
+                if off:
+                    out["tz_offset"] = off
+                    break
 
-            lat_v, lat_ref = g("GPSLatitude"), g("GPSLatitudeRef")
-            lng_v, lng_ref = g("GPSLongitude"), g("GPSLongitudeRef")
-            if not lat_v or not lng_v:
-                return out
+            if gps_ifd:
+                def g(name):
+                    tid = _GPS_TAGS.get(name)
+                    return gps_ifd.get(tid) if tid is not None else None
 
-            lat = _dms_to_deg(lat_v)
-            lng = _dms_to_deg(lng_v)
-            if lat_ref == "S":
-                lat = -lat
-            if lng_ref == "W":
-                lng = -lng
-            if -90 <= lat <= 90 and -180 <= lng <= 180:
-                out["lat"] = round(lat, 7)
-                out["lng"] = round(lng, 7)
+                lat_v, lat_ref = g("GPSLatitude"), g("GPSLatitudeRef")
+                lng_v, lng_ref = g("GPSLongitude"), g("GPSLongitudeRef")
+                if lat_v and lng_v:
+                    lat = _dms_to_deg(lat_v)
+                    lng = _dms_to_deg(lng_v)
+                    if _as_str(lat_ref) == "S":
+                        lat = -lat
+                    if _as_str(lng_ref) == "W":
+                        lng = -lng
+                    if -90 <= lat <= 90 and -180 <= lng <= 180:
+                        out["lat"] = round(lat, 7)
+                        out["lng"] = round(lng, 7)
+
+                alt = _as_float(g("GPSAltitude"))
+                alt_ref = _as_int(g("GPSAltitudeRef"))
+                out["altitude_ref"] = alt_ref
+                if alt is not None:
+                    out["altitude"] = round(-alt if alt_ref == 1 else alt, 2)
+
+                heading = _as_float(g("GPSImgDirection"))
+                if heading is not None:
+                    out["heading"] = round(heading % 360.0, 2)
+                out["heading_ref"] = _as_str(g("GPSImgDirectionRef"))
+
+                h_err = _as_float(g("GPSHPositioningError"))
+                dop = _as_float(g("GPSDOP"))
+                if h_err is not None:
+                    out["gps_h_error"] = round(h_err, 2)
+                if dop is not None:
+                    out["gps_dop"] = round(dop, 2)
+
+                out["gps_date"] = _as_str(g("GPSDateStamp"))
+                out["gps_time"] = _gps_time_str(g("GPSTimeStamp"))
+
+            out["taken_at_utc"] = _compute_taken_at_utc(
+                out["taken_at"], out["tz_offset"], out["gps_date"], out["gps_time"]
+            )
     except Exception as e:
         out["error"] = str(e)
     return out
@@ -190,6 +417,77 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_photos_geohash ON photos(geohash);
         CREATE INDEX IF NOT EXISTS idx_photos_mtime ON photos(mtime);
         """
+    )
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(photos)")}
+    for name, typ in _META_COLUMNS:
+        if name not in existing:
+            conn.execute(f"ALTER TABLE photos ADD COLUMN {name} {typ}")
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_photos_hash ON photos(content_hash);
+        CREATE INDEX IF NOT EXISTS idx_photos_city ON photos(city);
+        CREATE INDEX IF NOT EXISTS idx_photos_make ON photos(make);
+        CREATE INDEX IF NOT EXISTS idx_photos_taken_utc ON photos(taken_at_utc);
+        """
+    )
+
+
+def _row_get(row, key, default=None):
+    try:
+        val = row[key]
+    except (IndexError, KeyError):
+        return default
+    return default if val is None else val
+
+
+def needs_meta_backfill(row) -> bool:
+    if row is None:
+        return True
+    return not _row_get(row, "content_hash") or _row_get(row, "width") is None
+
+
+def lookup_place(lat: float, lng: float) -> dict:
+    """扫描时写入地点字段；失败不阻断索引，也不写入占位文案。"""
+    empty = {
+        "city": None,
+        "district": None,
+        "country": None,
+        "road": None,
+        "place_label": None,
+        "place_address": None,
+        "place_provider": None,
+    }
+    try:
+        place = reverse_geocode(lat, lng)
+    except Exception:
+        return empty
+    if not place.get("ok"):
+        return empty
+    return {
+        "city": _empty_to_none(place.get("city")),
+        "district": _empty_to_none(place.get("district")),
+        "country": _empty_to_none(place.get("country")),
+        "road": _empty_to_none(place.get("road")),
+        "place_label": _empty_to_none(place.get("label")),
+        "place_address": _empty_to_none(place.get("address")),
+        "place_provider": _empty_to_none(place.get("provider")),
+    }
+
+
+def upsert_photo(conn: sqlite3.Connection, rec: dict) -> None:
+    cols = list(rec.keys())
+    placeholders = ",".join("?" * len(cols))
+    updates = ",".join(
+        f"{c}=excluded.{c}" for c in cols if c not in ("rel_path", "first_seen_at")
+    )
+    updates += ", first_seen_at=COALESCE(photos.first_seen_at, excluded.first_seen_at)"
+    conn.execute(
+        f"""
+        INSERT INTO photos ({",".join(cols)})
+        VALUES ({placeholders})
+        ON CONFLICT(rel_path) DO UPDATE SET {updates}
+        """,
+        tuple(rec[c] for c in cols),
     )
 
 
@@ -413,6 +711,7 @@ def index_photos(
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     ensure_schema(conn)
+    load_geocode_cache()
 
     existing = {
         row["rel_path"]: row
@@ -420,7 +719,31 @@ def index_photos(
     }
 
     seen: set[str] = set()
+    geocode_ok = True
+    geocode_fail_streak = 0
     emit(phase="running", message=f"photos/ 共 {total} 张，开始索引…")
+
+    def place_fields(lat: float, lng: float) -> dict:
+        nonlocal geocode_ok, geocode_fail_streak
+        empty = {
+            "city": None,
+            "district": None,
+            "country": None,
+            "road": None,
+            "place_label": None,
+            "place_address": None,
+            "place_provider": None,
+        }
+        if not geocode_ok:
+            return empty
+        place = lookup_place(lat, lng)
+        if place.get("place_label") or place.get("city"):
+            geocode_fail_streak = 0
+            return place
+        geocode_fail_streak += 1
+        if geocode_fail_streak >= 3:
+            geocode_ok = False
+        return place
 
     for path in images:
         stats["scanned"] += 1
@@ -431,9 +754,7 @@ def index_photos(
         emit(currentFile=rel, message="索引 photos…")
 
         prev = existing.get(rel)
-
-        # 增量：有 GPS 且未变更 → 跳过
-        if (
+        file_unchanged = (
             not force
             and prev is not None
             and prev["has_gps"]
@@ -441,7 +762,10 @@ def index_photos(
             and prev["size"] == size
             and prev["thumb_path"]
             and (ROOT / prev["thumb_path"]).is_file()
-        ):
+        )
+
+        # 增量：有 GPS、文件未变、元数据已齐全 → 跳过
+        if file_unchanged and not needs_meta_backfill(prev):
             stats["skipped"] += 1
             seen.add(rel)
             continue
@@ -477,47 +801,65 @@ def index_photos(
                 meta["error"] = str(e)
             continue
 
-        # 有 GPS：写入索引
+        # 有 GPS：写入索引（库为完整真相源；分片 JSON 仍只导出地图所需字段）
         seen.add(rel)
-        gh = geohash_encode(meta["lat"], meta["lng"])
-        thumb_rel = thumb_rel_for(rel)
-        try:
-            make_thumb(path, ROOT / thumb_rel)
-        except Exception as e:
-            meta["error"] = (meta.get("error") or "") + f"; thumb: {e}"
-            thumb_rel = None
-            stats["errors"] += 1
+        if file_unchanged:
+            thumb_rel = prev["thumb_path"]
+            emit(currentFile=rel, message="补全元数据…")
+        else:
+            thumb_rel = thumb_rel_for(rel)
+            try:
+                make_thumb(path, ROOT / thumb_rel)
+            except Exception as e:
+                meta["error"] = (meta.get("error") or "") + f"; thumb: {e}"
+                thumb_rel = None
+                stats["errors"] += 1
 
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            """
-            INSERT INTO photos (rel_path, mtime, size, lat, lng, taken_at, has_gps, thumb_path, geohash, error, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(rel_path) DO UPDATE SET
-              mtime=excluded.mtime,
-              size=excluded.size,
-              lat=excluded.lat,
-              lng=excluded.lng,
-              taken_at=excluded.taken_at,
-              has_gps=excluded.has_gps,
-              thumb_path=excluded.thumb_path,
-              geohash=excluded.geohash,
-              error=excluded.error,
-              indexed_at=excluded.indexed_at
-            """,
-            (
-                rel,
-                mtime,
-                size,
-                meta["lat"],
-                meta["lng"],
-                meta["taken_at"],
-                1,
-                thumb_rel,
-                gh,
-                meta.get("error"),
-                now,
-            ),
+        birth = getattr(st, "st_birthtime", None)
+        place = place_fields(meta["lat"], meta["lng"])
+        upsert_photo(
+            conn,
+            {
+                "rel_path": rel,
+                "mtime": mtime,
+                "size": size,
+                "lat": meta["lat"],
+                "lng": meta["lng"],
+                "taken_at": meta["taken_at"],
+                "has_gps": 1,
+                "thumb_path": thumb_rel,
+                "geohash": geohash_encode(meta["lat"], meta["lng"]),
+                "error": meta.get("error"),
+                "indexed_at": now,
+                "content_hash": _file_sha256(path),
+                "width": meta.get("width"),
+                "height": meta.get("height"),
+                "orientation": meta.get("orientation"),
+                "mime": meta.get("mime"),
+                "make": meta.get("make"),
+                "model": meta.get("model"),
+                "tz_offset": meta.get("tz_offset"),
+                "taken_at_utc": meta.get("taken_at_utc"),
+                "gps_date": meta.get("gps_date"),
+                "gps_time": meta.get("gps_time"),
+                "altitude": meta.get("altitude"),
+                "altitude_ref": meta.get("altitude_ref"),
+                "heading": meta.get("heading"),
+                "heading_ref": meta.get("heading_ref"),
+                "gps_h_error": meta.get("gps_h_error"),
+                "gps_dop": meta.get("gps_dop"),
+                "city": place["city"],
+                "district": place["district"],
+                "country": place["country"],
+                "road": place["road"],
+                "place_label": place["place_label"],
+                "place_address": place["place_address"],
+                "place_provider": place["place_provider"],
+                "original_name": path.name,
+                "file_ctime": _ts_iso(birth if birth is not None else st.st_ctime),
+                "first_seen_at": now,
+            },
         )
         stats["updated"] += 1
 
@@ -581,6 +923,7 @@ def export_shards(
     manifest_path: Path,
     photos_dir: Path,
 ) -> None:
+    # 分片只给地图用：完整元数据留在 SQLite，后续按功能另开接口。
     # 清空旧分片，避免残留
     for old in shards_dir.glob("*.json"):
         old.unlink()
