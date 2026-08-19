@@ -232,13 +232,20 @@ def main():
     load_geocode_cache()
 
     handler = partial(Handler, directory=ROOT)
-    httpd = ThreadingHTTPServer((args.bind, args.port), handler)
-    print(f"Geo Photos → http://{args.bind}:{args.port}/")
-    print(f"扫描界面 → http://{args.bind}:{args.port}/scan.html")
+    try:
+        httpd = ThreadingHTTPServer((args.bind, args.port), handler)
+    except OSError as e:
+        print(f"无法监听 {args.bind}:{args.port}：{e}", flush=True)
+        print("端口可能已被占用。可先打开已有服务：", flush=True)
+        print(f"  http://{args.bind}:{args.port}/scan.html", flush=True)
+        sys.exit(1)
+
+    print(f"Geo Photos → http://{args.bind}:{args.port}/", flush=True)
+    print(f"扫描界面 → http://{args.bind}:{args.port}/scan.html", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\n已停止")
+        print("\n已停止", flush=True)
 
 
 if __name__ == "__main__":
